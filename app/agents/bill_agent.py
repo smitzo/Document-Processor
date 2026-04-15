@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.schemas import AGENT_DOCUMENT_MAP, BillLineItem, ClaimState, ItemizedBillData
 from app.utils.llm_client import build_vision_message, call_llm_json, call_llm_json_text_only
+from app.utils.text_extractors import extract_bill_data_from_text, has_bill_signal
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,11 @@ def bill_agent(state: ClaimState) -> dict:
     if not assigned_pages:
         logger.info("[Bill Agent] No pages assigned - skipping")
         return {"bill_data": None}
+
+    local_bill = extract_bill_data_from_text(_build_text_context(state, assigned_pages))
+    if has_bill_signal(local_bill):
+        logger.info("[Bill Agent] Returning deterministic text extraction result")
+        return {"bill_data": local_bill}
 
     try:
         merged = _extract_billing_chunks(state, assigned_pages)
