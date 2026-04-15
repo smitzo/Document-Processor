@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 def aggregator(state: ClaimState) -> dict[str, Any]:
     """LangGraph node: aggregate all extracted data into a final response."""
+    unique_errors = _unique_errors(state.errors)
     logger.info("[Aggregator] Building final response for claim %s", state.claim_id)
     logger.info(
         "[Aggregator] Inputs | segregated=%s | identity=%s | discharge=%s | bill=%s | errors=%d",
@@ -29,7 +30,7 @@ def aggregator(state: ClaimState) -> dict[str, Any]:
         state.identity_data is not None,
         state.discharge_data is not None,
         state.bill_data is not None,
-        len(state.errors),
+        len(unique_errors),
     )
 
     # -----------------------------------------------------------------------
@@ -74,14 +75,14 @@ def aggregator(state: ClaimState) -> dict[str, Any]:
         "document_types_found": list(doc_map.keys()),
         "pages_per_document_type": doc_map,
         "agents_ran": _agents_that_ran(state),
-        "errors_count": len(state.errors),
+        "errors_count": len(unique_errors),
     }
 
     # -----------------------------------------------------------------------
     # Determine status
     # -----------------------------------------------------------------------
     status = "success"
-    if state.errors:
+    if unique_errors:
         status = "partial" if extracted_data else "failed"
     elif state.segregator_output and all(
         page.document_type == "other" and page.description == "Fallback classification"
@@ -96,7 +97,7 @@ def aggregator(state: ClaimState) -> dict[str, Any]:
         status=status,
         page_classification=page_classification,
         extracted_data=extracted_data,
-        errors=state.errors,
+        errors=unique_errors,
         processing_summary=processing_summary,
     )
 
@@ -104,11 +105,11 @@ def aggregator(state: ClaimState) -> dict[str, Any]:
         "[Aggregator] Done. Status=%s | Agents ran: %s | Errors: %d",
         status,
         processing_summary["agents_ran"],
-        len(state.errors),
+        len(unique_errors),
     )
     
     # Persist the response on the graph state so the API can read it reliably.
-    return {"final_response": response, "errors": state.errors}
+    return {"final_response": response, "errors": unique_errors}
 
 
 # ---------------------------------------------------------------------------
@@ -124,3 +125,13 @@ def _agents_that_ran(state: ClaimState) -> list[str]:
     if state.bill_data is not None:
         ran.append("bill_agent")
     return ran
+
+
+def _unique_errors(errors: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for error in errors:
+        if error not in seen:
+            seen.add(error)
+            unique.append(error)
+    return unique
