@@ -1,23 +1,9 @@
-"""
-Segregator Agent
-================
-LangGraph node: START → [Segregator Agent] → ...
-
-Responsibilities
-----------------
-1. Receive the full PDF (bytes) + per-page text from the pipeline state.
-2. Use the LLM (with vision) to classify every page into one of 9 document types.
-3. Populate `state.segregator_output` with a per-page classification and a
-   document_page_map (doc_type → [page_indices]).
-
-The agent sends *all* pages to the LLM in a single vision call to maximise
-context for cross-page decisions (e.g., a multi-page itemized bill).
-"""
+"""Segregator node for page-level document classification."""
 
 from __future__ import annotations
-import json
+
 import logging
-from typing import Any
+import time
 
 from app.core.schemas import (
     ClaimState,
@@ -25,20 +11,14 @@ from app.core.schemas import (
     SegregatorOutput,
     DOCUMENT_TYPES,
 )
-from app.utils.llm_client import call_llm_json, build_vision_message
+from app.utils.llm_client import build_vision_message, call_llm_json, call_llm_json_text_only
 from app.utils.pdf_utils import render_pages_to_base64, extract_page_texts, get_page_count
 
 logger = logging.getLogger(__name__)
-# In segregator.py, add a limit check
-MAX_PAGES_PER_CALL = 20
-CHUNK_SIZE = 8
-
-# if total_pages > MAX_PAGES_PER_CALL:
-#     logger.warning(f"[Segregator] PDF has {total_pages} pages, which may exceed token limits")
-
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
+SEGREGATOR_CHUNK_SIZE = 4
+SEGREGATOR_TEXT_ONLY_MIN_CHARS = 120
+SEGREGATOR_TEXT_SNIPPET_LIMIT = 900
+SEGREGATOR_MAX_RETRIES = 2
 
 SEGREGATOR_SYSTEM = """You are an expert medical document analyst specialising in insurance claim processing.
 
@@ -69,10 +49,6 @@ Response format (strict JSON array, one entry per page, 0-indexed):
   ...
 ]"""
 
-# ---------------------------------------------------------------------------
-# Node function
-# ---------------------------------------------------------------------------
-
 def segregator_agent(state: ClaimState) -> ClaimState:
     """LangGraph node: classify every PDF page by document type."""
     logger.info("[Segregator] Starting page classification for claim %s", state.claim_id)
@@ -82,53 +58,38 @@ def segregator_agent(state: ClaimState) -> ClaimState:
     state.total_pages = total_pages
     logger.info("[Segregator] PDF page count: %d", total_pages)
 
-    # Extract text for all pages
     page_texts = extract_page_texts(pdf_bytes)
     state.page_texts = page_texts
     logger.info("[Segregator] Extracted text from %d pages", len(page_texts))
 
-    # Render all pages to images for vision model
-    logger.info("[Segregator] Rendering %d pages to images…", total_pages)
+    logger.info("[Segregator] Rendering %d pages to images", total_pages)
     page_images = render_pages_to_base64(pdf_bytes, dpi=120)
     state.page_images = page_images
     logger.info("[Segregator] Rendered %d page images", len(page_images))
 
     errors = list(state.errors or [])
 
-    # Build prompt with text context to assist vision
-    text_context_parts = []
-    for i in range(total_pages):
-        txt = page_texts.get(i, "").strip()
-        snippet = txt[:600] if txt else "(no extractable text — likely image-based)"
-        text_context_parts.append(f"=== Page {i} text snippet ===\n{snippet}")
-    text_context = "\n\n".join(text_context_parts)
+    result: list[dict] = []
+    chunk_failed = False
+    chunk_error: Exception | None = None
+    page_indices = list(range(total_pages))
 
-    prompt = (
-        f"This PDF has {total_pages} page(s) for claim ID: {state.claim_id}.\n\n"
-        f"I am providing you with:\n"
-        f"1. Images of every page (in order, 0-indexed)\n"
-        f"2. Extracted text snippets for context\n\n"
-        f"Text snippets:\n{text_context}\n\n"
-        f"Please classify EVERY page (0 to {total_pages - 1}) into one of the 9 document types.\n"
-        f"Return a JSON array with exactly {total_pages} elements."
-    )
+    for chunk in _chunk_pages(page_indices, SEGREGATOR_CHUNK_SIZE):
+        try:
+            result.extend(_classify_chunk(state.claim_id, chunk, page_texts, page_images))
+        except Exception as exc:
+            logger.exception("[Segregator] Chunk classification failed for pages %s", chunk)
+            chunk_failed = True
+            chunk_error = exc
+            break
 
-    # Vision call — send all page images + prompt
-    images = [page_images[k] for k in sorted(page_images.keys())]
-    messages = build_vision_message(prompt, images)
-
-    try:
-        result = call_llm_json(SEGREGATOR_SYSTEM, messages, max_tokens=4096)
-    except Exception as exc:
-        logger.exception("[Segregator] LLM call failed")
-        errors.append(f"Segregator LLM error: {exc}")
-        # Fallback: classify everything as 'other'
+    if chunk_failed:
+        errors.append(f"Segregator LLM error: {chunk_error}")
         result = [
             {"page_number": i, "document_type": "other", "confidence": "low", "description": "Fallback classification"}
             for i in range(total_pages)
         ]
 
-    # Parse and validate the response
     pages: list[PageClassification] = []
     doc_page_map: dict[str, list[int]] = {dt: [] for dt in DOCUMENT_TYPES}
 
@@ -150,7 +111,6 @@ def segregator_agent(state: ClaimState) -> ClaimState:
         except Exception as exc:
             logger.warning("[Segregator] Failed to parse entry %s: %s", entry, exc)
 
-    # Remove empty doc types
     doc_page_map = {k: v for k, v in doc_page_map.items() if v}
 
     state.segregator_output = SegregatorOutput(pages=pages, document_page_map=doc_page_map)
@@ -168,3 +128,59 @@ def segregator_agent(state: ClaimState) -> ClaimState:
         "segregator_output": state.segregator_output,
         "errors": errors,
     }
+
+
+def _classify_chunk(
+    claim_id: str,
+    chunk: list[int],
+    page_texts: dict[int, str],
+    page_images: dict[int, str],
+) -> list[dict]:
+    logger.info("[Segregator] Classifying chunk pages %s", chunk)
+    prompt = (
+        f"Claim ID: {claim_id}\n"
+        f"Pages in this chunk: {chunk}\n\n"
+        "Classify each page into exactly one document type and preserve the original page_number values.\n\n"
+        f"Page text:\n{_build_text_context(chunk, page_texts)}\n\n"
+        f"Return a JSON array with exactly {len(chunk)} elements."
+    )
+
+    last_error: Exception | None = None
+    for attempt in range(1, SEGREGATOR_MAX_RETRIES + 1):
+        try:
+            if _should_use_text_only(chunk, page_texts):
+                return call_llm_json_text_only(SEGREGATOR_SYSTEM, prompt, max_tokens=1536)
+
+            images = [page_images[p] for p in chunk if p in page_images]
+            messages = build_vision_message(prompt, images)
+            return call_llm_json(SEGREGATOR_SYSTEM, messages, max_tokens=1536)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "[Segregator] Chunk attempt %d/%d failed for pages %s: %s",
+                attempt,
+                SEGREGATOR_MAX_RETRIES,
+                chunk,
+                exc,
+            )
+            if attempt < SEGREGATOR_MAX_RETRIES:
+                time.sleep(1.5 * attempt)
+
+    raise last_error if last_error is not None else RuntimeError("Unknown segregator chunk failure")
+
+
+def _chunk_pages(pages: list[int], size: int) -> list[list[int]]:
+    return [pages[index:index + size] for index in range(0, len(pages), size)]
+
+
+def _build_text_context(chunk: list[int], page_texts: dict[int, str]) -> str:
+    parts = []
+    for page in chunk:
+        text = (page_texts.get(page) or "").strip()
+        snippet = text[:SEGREGATOR_TEXT_SNIPPET_LIMIT] if text else "(no extractable text)"
+        parts.append(f"Page {page}:\n{snippet}")
+    return "\n\n".join(parts)
+
+
+def _should_use_text_only(chunk: list[int], page_texts: dict[int, str]) -> bool:
+    return all(len((page_texts.get(page) or "").strip()) >= SEGREGATOR_TEXT_ONLY_MIN_CHARS for page in chunk)

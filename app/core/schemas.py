@@ -3,7 +3,8 @@ Pydantic schemas for the claim processing pipeline.
 """
 
 from __future__ import annotations
-from typing import Any, Optional
+import operator
+from typing import Annotated, Any, Optional
 from pydantic import BaseModel, Field
 
 
@@ -141,7 +142,7 @@ class ClaimState(BaseModel):
     final_response: Optional["ClaimResponse"] = None
 
     # Errors collected during processing
-    errors: list[str] = Field(default_factory=list)
+    errors: Annotated[list[str], operator.add] = Field(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
