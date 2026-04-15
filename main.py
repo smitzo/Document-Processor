@@ -1,7 +1,3 @@
-"""
-Claim Processing Pipeline — FastAPI entry point.
-"""
-
 import logging
 
 from fastapi import FastAPI
@@ -28,7 +24,7 @@ app = FastAPI(
         "AI-powered medical claim PDF processing using LangGraph multi-agent orchestration. "
         "Segregates, extracts, and aggregates data from multi-page claim documents."
     ),
-    version="1.0.0",
+    version="1.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -49,7 +45,7 @@ async def root():
     return {
         "service": "Claim Processing Pipeline",
         "status": "running",
-        "version": "1.0.0",
+        "version": "1.0",
         "docs": "/docs",
     }
 

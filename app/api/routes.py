@@ -1,13 +1,6 @@
-"""
-API Routes
-==========
-POST /api/process — main claim processing endpoint.
-"""
-
 from __future__ import annotations
 import logging
-import uuid
-from typing import Any
+
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse

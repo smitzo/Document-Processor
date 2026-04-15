@@ -48,12 +48,12 @@ def build_graph() -> StateGraph:
     # -----------------------------------------------------------------------
     graph.set_entry_point("segregator")
 
-    # Fan-out: segregator feeds all three agents
+    # The segregator runs first, then LangGraph fans out to the specialist agents.
     graph.add_edge("segregator", "id_agent")
     graph.add_edge("segregator", "discharge_agent")
     graph.add_edge("segregator", "bill_agent")
 
-    # Fan-in: all agents feed aggregator
+    # The aggregator acts as the fan-in point for all extraction outputs.
     graph.add_edge("id_agent", "aggregator")
     graph.add_edge("discharge_agent", "aggregator")
     graph.add_edge("bill_agent", "aggregator")

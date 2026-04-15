@@ -34,7 +34,7 @@ AGENT_DOCUMENT_MAP = {
     "cash_receipt": "bill_agent",       # receipts tie to billing
     "investigation_report": "bill_agent",  # lab reports often accompany billing
     "cheque_or_bank_details": "id_agent",
-    # "other": "id_agent",
+    "other": "id_agent",
 }
 
 

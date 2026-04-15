@@ -86,6 +86,7 @@ def segregator_agent(state: ClaimState) -> ClaimState:
     unresolved_pages: list[int] = []
 
     for page in range(total_pages):
+        # Resolve obvious text-heavy pages locally before spending an LLM call.
         heuristic = _heuristic_classify_page(page, page_texts.get(page, ""))
         if heuristic is not None:
             result.append(heuristic)
@@ -103,6 +104,7 @@ def segregator_agent(state: ClaimState) -> ClaimState:
             result.extend(_classify_chunk(state.claim_id, chunk, page_texts, page_images))
         except Exception as exc:
             logger.exception("[Segregator] Chunk classification failed for pages %s", chunk)
+            # If a chunk fails, retry page-by-page so one bad response does not ruin the whole PDF.
             errors.append(f"Segregator chunk error for pages {chunk}: {exc}")
             result.extend(_classify_pages_individually(state.claim_id, chunk, page_texts, page_images, errors))
 

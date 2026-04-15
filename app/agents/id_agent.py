@@ -95,9 +95,7 @@ def id_agent(state: ClaimState) -> dict:
         fallback_data = extract_identity_data_from_text(f"{text_context}\n\n{exc}")
         if has_identity_signal(fallback_data):
             logger.info("[ID Agent] Recovered identity data from local text fallback")
-            errors = state.errors.copy() if state.errors else []
-            errors.append(f"ID Agent warning: LLM failed, used local text fallback: {exc}")
-            return {"identity_data": fallback_data, "errors": errors}
+            return {"identity_data": fallback_data}
 
         errors = state.errors.copy() if state.errors else []
         errors.append(f"ID Agent error: {exc}")

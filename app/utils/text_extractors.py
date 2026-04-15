@@ -9,6 +9,7 @@ from app.core.schemas import BillLineItem, DischargeSummaryData, IdentityData, I
 
 
 def extract_identity_data_from_text(text: str) -> IdentityData:
+    # These helpers are deterministic fallbacks for text-based PDFs.
     compact = _compact(text)
     lines = _lines(text)
     return IdentityData(
